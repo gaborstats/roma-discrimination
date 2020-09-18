@@ -6,7 +6,7 @@ Contents:
 
 - merging data sets
 - data cleaning: handling unicode, citations, hyperlinks
-- lemmatization: also includes lexical diversity and frequency features
+- lemmatization and lexical feature creation
 - tokenization
-- creation of various dat structures: count, tf, tf-idf
+- creation of data structures: count, tf, tf-idf
 - classifiers: elastic net, naive Bayes, XGBoost  
