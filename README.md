@@ -9,3 +9,4 @@ Contents:
 - tokenization
 - creation of data structures: count, tf, tf-idf
 - classifiers: elastic net, naive Bayes, XGBoost  
+- wordcloud
