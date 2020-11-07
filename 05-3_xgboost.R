@@ -46,81 +46,50 @@ feat <- subset(df, select = -c(word))
 feat_agg <- feat[!duplicated(feat[ ,"telepules"]),]
 
 
+
 require(dplyr)
-dat_count = left_join(x = df_count, 
-                 y = feat_agg, 
-                 by = c("doc_id" = "telepules"), keep = F)
- 
-dat_tf = left_join(x = df_tf, 
-                      y = feat_agg, 
-                      by = c("doc_id" = "telepules"), keep = F)
+dat_count_j = left_join(x = df_count, 
+                        y = feat_agg, 
+                        by = c("doc_id" = "telepules"), keep = F)
 
-dat_tf_idf = left_join(x = df_tf_idf, 
-                      y = feat_agg, 
-                      by = c("doc_id" = "telepules"), keep = F)
+dat_tf_j = left_join(x = df_tf, 
+                     y = feat_agg, 
+                     by = c("doc_id" = "telepules"), keep = F)
 
-dat_count <- subset(dat_count, select = -c(doc_id))
-dat_tf <- subset(dat_tf, select = -c(doc_id))
-dat_tf_idf <- subset(dat_tf_idf, select = -c(doc_id))
+dat_tf_idf_j = left_join(x = df_tf_idf, 
+                         y = feat_agg, 
+                         by = c("doc_id" = "telepules"), keep = F)
 
+dat_count_ns <- subset(dat_count_j, select = -c(doc_id))
+dat_tf_ns <- subset(dat_tf_j, select = -c(doc_id))
+dat_tf_idf_ns <- subset(dat_tf_idf_j, select = -c(doc_id))
 
-# nearzero var kezelese
-#### ez meg lefut pca-val: 
-j = nearZeroVar(dat_count, saveMetrics = F, freqCut = 25, uniqueCut = 2, names = F) # 220 db prediktor
+# lets scale variables, w centering
 
-# explanation: https://rstatisticsblog.com/data-science-in-action/data-preprocessing/how-to-identify-variables-with-zero-variance/
+dat_count_X <- subset(dat_count_ns, select = -c(roma_felado))
+dat_count_X_s = as.data.frame(scale(dat_count_X, scale = T, center = T))
+dat_count = as.data.frame(cbind(dat_count_X_s, roma_felado = dat_count_ns$roma_felado))
 
-dat_count_nzv = dat_count[,-j] # 0.49 az AUC akkor is, 
-dat_tf_nzv = dat_tf[,-j]
-dat_tf_idf_nzv = dat_tf_idf[,-j]
+dat_tf_X <- subset(dat_tf_ns, select = -c(roma_felado))
+dat_tf_X_s = as.data.frame(scale(dat_tf_X, scale = T, center = T))
+dat_tf = as.data.frame(cbind(dat_tf_X_s, roma_felado = dat_tf_ns$roma_felado))
 
-# split train test
-set.seed(3)
-train_index = sample(1:nrow(dat_count_nzv), 4*nrow(dat_count_nzv)/5)
-
-train_count = dat_count_nzv[train_index,]
-train_tf = dat_count_nzv[train_index,]
-train_tf_idf = dat_count_nzv[train_index,]
-
-test_count = dat_count_nzv[-train_index,]
-test_tf = dat_count_nzv[-train_index,]
-test_tf_idf = dat_count_nzv[-train_index,]
-
+dat_tf_idf_X <- subset(dat_tf_idf_ns, select = -c(roma_felado))
+dat_tf_idf_X_s = as.data.frame(scale(dat_tf_idf_X, scale = T, center = T))
+dat_tf_idf = as.data.frame(cbind(dat_tf_idf_X_s, roma_felado = dat_tf_idf_ns$roma_felado))
 
 
 xgb_ab_train <- xgb.DMatrix(
-  data    = select(train_count, -c(roma_felado)) %>% as.matrix(),
-  label   = train_count$roma_felado
+  data    = select(dat_count, -c(roma_felado)) %>% as.matrix(),
+  label   = dat_count$roma_felado
 )
 
-
-xgb_ab_train_test <- xgb.DMatrix(
-  data    = select(test_count, -c(roma_felado)) %>% as.matrix(),
-  label   = test_count$roma_felado
-)
-
-# 0.2. EDA -----------------------------------------------------------
-
-# find most common words
-p = td %>%
-  count(term, sort = T)
-print(p) 
-
-# wordcloud (requires a dfm)
-textplot_wordcloud(dfm, max_words = 50, rotation = 0.25, 
-                   color = rev(RColorBrewer::brewer.pal(10, "RdBu")))
 
 
 
 ###########
 # elemzes #
 ###########
-
-# forrasok:
-# alapos: http://uc-r.github.io/gbm_regression
-# tuninghoz hasznos: https://www.hackerearth.com/practice/machine-learning/machine-learning-algorithms/beginners-tutorial-on-xgboost-parameter-tuning-r/tutorial/#:~:text=nrounds%5Bdefault%3D100%5D&text=For%20classification%2C%20it%20is%20similar,number%20of%20trees%20to%20grow.
-# https://xgboost.ai/rstats/2016/03/10/xgboost.html
-# http://www.sthda.com/english/articles/35-statistical-machine-learning-essentials/139-gradient-boosting-essentials-in-r-using-xgboost/
 
 # 1.1. extreme gradient boosting  w count data -------------------------------------------------------
 
@@ -130,103 +99,59 @@ params <- list(
   max_depth = 6,
   min_child_weight = 1,
   subsample = 1,
-  colsample_bytree = 1
+  colsample_bytree = 1,
+  gamma = 0
 )
 
 set.seed(3)
+# nfold a cv, nrounds pedig, h hanyszor ismeteljuk az egesz cv-t: 
 start.time <- Sys.time()
 model <- xgb.cv(
   data = xgb_ab_train,
   params = params,
-  nrounds = 1000,
+  nrounds = 100,
   nfold = 3,
   objective = "binary:logistic",  
   verbose = 0,               # silent,
-  early_stopping_rounds = 20 # stop if no improvement for 10 consecutive
+  early_stopping_rounds = 20, # stop if no improvement for 20 consecutive
+  eval_metric = 'auc',
+  prediction = T
 )
 end.time <- Sys.time()
 time.taken <- end.time - start.time
 time.taken 
 
-model
 
-# get number of trees that minimize error
-model$evaluation_log %>%
-  dplyr::summarise(
-    ntrees.train = which(train_error_mean == min(train_error_mean))[1],
-    error.train   = min(train_error_mean),
-    ntrees.test  = which(test_error_mean == min(test_error_mean))[1],
-    error.test   = min(test_error_mean),
-  )
+# CM
 
-
-# plot error vs number trees
-ggplot(model$evaluation_log) +
-  geom_line(aes(iter, train_error_mean), color = "red") +
-  geom_line(aes(iter, test_error_mean), color = "blue")
-
-
-# train optimal model
-model_final <- xgboost(
-  params = params,
-  data = xgb_ab_train,
-  nrounds = 1000,
-  objective = "binary:logistic",
-  verbose = 0
-)
-
-
-# create importance matrix
-importance_matrix <- xgb.importance(model = model_final)
-
-# variable importance plot
-xgb.plot.importance(importance_matrix, top_n = 10, measure = "Gain")
-
-
-# cm
-predictions_enet_count <- model_final %>% predict(xgb_ab_train_test, type = "prob") %>% as.vector()
-
-pred_class <- ifelse(predictions_enet_count> 0.5, 1, 0) 
-# itt vmiert csak egy pred oszlop van, erdekes.
+# model$pred # itt vannak a predikciok
+pred_class <- ifelse(model$pred> 0.5, 1, 0) 
 pred_f = factor(pred_class, levels= c("0", "1"))
-obs = as.factor(test_count$roma_felado)
+obs = as.factor(dat_count$roma_felado)
 
 confusionMatrix(data = pred_f, reference = obs)$table
 
-
 # AUC
-rocplot=function(pred_class, obs, ...){
-  predob = prediction(pred_class, obs)
-  perf = performance(predob, "tpr", "fpr")
-  plot(perf,...)}
-
-rocplot(predictions_enet_count, obs, main="ROC plot")
+auc = round(max(model$evaluation_log$test_auc_mean),2)
+cat("Az XGB count AUC erteke:", auc) 
 
 
-pred_ROCR <- prediction(pred_class, obs)
-auc_ROCR <- performance(pred_ROCR, measure = "auc")
-auc_ROCR <- round(auc_ROCR@y.values[[1]],2)
-cat("Az XGB count AUC erteke:", auc_ROCR) 
-# default beallitassal:
-# 0.45 AUC 220 prediktorral
-# 0.49 AUC 413 prediktorral 
 
-
-# tuning 1
+# 1.2. tuning -------------------------------------------------------
 
 # create hyperparameter grid
+# explanation: https://xgboost.readthedocs.io/en/latest/parameter.html
 hyper_grid <- expand.grid(
-  eta = c(.1, .3, .5),
-  max_depth = c(5, 6, 7),
-  min_child_weight = c(1, 3),
-  subsample = c(.8, 1), 
-  colsample_bytree = c(.9, 1),
-  gamma = c(0,5)
+  eta = c(.3,.5), 
+  max_depth = c(4, 6), 
+  min_child_weight = c(1, 2), 
+  subsample = c(.6,.8, 1), 
+  colsample_bytree = c(.6,.8, 1),  
+  gamma = c(0,5) 
 )
 
 
 # grid search 
-# most csak 100 iteracioval
 start.time <- Sys.time()
 for(i in 1:nrow(hyper_grid)) {
   
@@ -236,7 +161,8 @@ for(i in 1:nrow(hyper_grid)) {
     max_depth = hyper_grid$max_depth[i],
     min_child_weight = hyper_grid$min_child_weight[i],
     subsample = hyper_grid$subsample[i],
-    colsample_bytree = hyper_grid$colsample_bytree[i]
+    colsample_bytree = hyper_grid$colsample_bytree[i],
+    gamma = hyper_grid$gamma[i]
   )
   
   # reproducibility
@@ -249,165 +175,108 @@ for(i in 1:nrow(hyper_grid)) {
     nfold = 3,
     nrounds = 100,
     objective = "binary:logistic",  
-    verbose = 0,               # silent,
-    early_stopping_rounds = 20 # stop if no improvement for 10 consecutive
+    verbose = 0,              
+    early_stopping_rounds = 20, # stop if no improvement for 10 consecutive
+    eval_metric = 'auc',
+    prediction = T
   )
   
   # add min training error and trees to grid
-  hyper_grid$optimal_trees[i] <- which.min(xgb.tune$evaluation_log$test_error_mean)
-  hyper_grid$min_error[i] <- min(xgb.tune$evaluation_log$test_error_mean)
+  hyper_grid$optimal_trees[i] <- which.max(xgb.tune$evaluation_log$test_auc_mean)
+  hyper_grid$max_auc[i] <- max(xgb.tune$evaluation_log$test_auc_mean)
 }
   
 end.time <- Sys.time()
 time.taken <- end.time - start.time
-time.taken # 6.2 perc
+time.taken # 6 perc
 
 top_params = hyper_grid %>%
-  dplyr::arrange(min_error) %>%
-  head(1)
+  dplyr::arrange(max_auc) %>%
+  tail(1)
 
 top_params
 top_params_l = lapply(top_params[1:6], as.data.frame)
 
+setwd("C:/Users/Gabor/Documents/01_ELTE/00_szakdoga/03_Adatok/05_Adatfeldolgozas/07_NLP-proba")
 
-saveRDS(top_params, file = "xgb_params.rds") # Save an object to a file
-readRDS(file = "xgb_params.rds") # Restore the object
+saveRDS(top_params, file = "xgb_params_ethnicity_count_10-30.rds") # Save an object to a file (6 p)
+#top_params = readRDS(file = "xgb_params_ethnicity_count_10-30.rds") # Restore the object
 
 
-# train optimal model
-model_final_tuned <- xgboost(
+
+# 1.3. train optimal model -------------------------------------------------------
+
+set.seed(3)
+model_final_tuned <- xgb.cv(
+  data = xgb_ab_train,
+  params = top_params_l,
+  nrounds = 100,
+  nfold = 3,
+  objective = "binary:logistic",  
+  verbose = 0,              
+  early_stopping_rounds = 20, # stop if no improvement for 10 consecutive
+  eval_metric = 'auc',
+  prediction = T
+)
+
+pred_class <- ifelse(model_final_tuned$pred> 0.5, 1, 0) 
+pred_f = factor(pred_class, levels= c("0", "1"))
+obs = as.factor(dat_count$roma_felado)
+
+confusionMatrix(data = pred_f, reference = obs)$table
+
+# AUC
+auc = round(max(model_final_tuned$evaluation_log$test_auc_mean),2)
+cat("Az XGB count AUC erteke:", auc) 
+
+
+
+
+# 1.4. extra -------------------------------------------------------
+
+# eleg lett volna 8 iteracio
+
+# get number of trees that maximize auc
+model_final_tuned$evaluation_log %>%
+  dplyr::summarise(
+    ntrees.train = which(train_auc_mean == max(train_auc_mean))[1],
+    auc.train   = max(train_auc_mean),
+    ntrees.test  = which(test_auc_mean == max(test_auc_mean))[1],
+    auc.test   = max(test_auc_mean)
+  )
+
+
+# plot error vs number trees
+ggplot(model_final_tuned$evaluation_log) +
+  geom_line(aes(iter, train_auc_mean), color = "red") +
+  geom_line(aes(iter, test_auc_mean), color = "blue")
+
+
+
+# feature importance
+
+# train final model
+xgb.fit.final <- xgboost(
   params = top_params_l,
   data = xgb_ab_train,
   nrounds = 100,
-  objective = "binary:logistic",
-  verbose = 0
+  objective = "binary:logistic",  
+  verbose = 0,              
+  early_stopping_rounds = 20, # stop if no improvement for 10 consecutive
+  eval_metric = 'auc'
 )
 
 
-# cm
-predictions_enet_count <- model_final_tuned %>% predict(xgb_ab_train_test, type = "prob") %>% as.vector()
+# create importance matrix
+importance_matrix <- xgb.importance(model = xgb.fit.final)
 
-pred_class <- ifelse(predictions_enet_count> 0.5, 1, 0) 
-# itt vmiert csak egy pred oszlop van, erdekes.
-pred_f = factor(pred_class, levels= c("0", "1"))
-obs = as.factor(test_count$roma_felado)
-
-confusionMatrix(data = pred_f, reference = obs)$table
+# variable importance plot
+xgb.plot.importance(importance_matrix, top_n = 10, measure = "Gain",
+                    rel_to_first = T, xlab = "Prediktorok relatív fontossága az etnicitás modellben")
 
 
-# AUC
-rocplot=function(pred_class, obs, ...){
-  predob = prediction(pred_class, obs)
-  perf = performance(predob, "tpr", "fpr")
-  plot(perf,...)}
-
-rocplot(predictions_enet_count, obs, main="ROC plot")
 
 
-pred_ROCR <- prediction(pred_class, obs)
-auc_ROCR <- performance(pred_ROCR, measure = "auc")
-auc_ROCR <- round(auc_ROCR@y.values[[1]],2)
-cat("Az XGB count AUC erteke:", auc_ROCR) 
-# 0.78 AUC 220 prediktorral
-# 0.48 AUC 413 prediktorral (ez fura)
 
 
-### tuning 2 ###
-
-# create hyperparameter grid
-hyper_grid <- expand.grid(
-  eta = c(.09, .1),
-  max_depth = c(4),
-  min_child_weight = c(3),
-  subsample = c(.7, .8), 
-  colsample_bytree = c(.9),
-  gamma = c(0)
-)
-
-
-# grid search 
-# most csak 100 iteracioval
-start.time <- Sys.time()
-for(i in 1:nrow(hyper_grid)) {
-  
-  # create parameter list
-  params <- list(
-    eta = hyper_grid$eta[i],
-    max_depth = hyper_grid$max_depth[i],
-    min_child_weight = hyper_grid$min_child_weight[i],
-    subsample = hyper_grid$subsample[i],
-    colsample_bytree = hyper_grid$colsample_bytree[i]
-  )
-  
-  # reproducibility
-  set.seed(3)
-  
-  # train model
-  xgb.tune <- xgb.cv(
-    data = xgb_ab_train,
-    params = params,
-    nfold = 3,
-    nrounds = 1000,
-    objective = "binary:logistic",  
-    verbose = 0,               # silent,
-    early_stopping_rounds = 20 # stop if no improvement for 10 consecutive.
-    # Q: az early stopping at optimal trees-re vonatk? 
-  )
-  
-  # add min training error and trees to grid
-  hyper_grid$optimal_trees[i] <- which.min(xgb.tune$evaluation_log$test_error_mean)
-  hyper_grid$min_error[i] <- min(xgb.tune$evaluation_log$test_error_mean)
-}
-
-end.time <- Sys.time()
-time.taken <- end.time - start.time
-time.taken # 1.2 perc
-
-top_params = hyper_grid %>%
-  dplyr::arrange(min_error) %>%
-  head(1)
-
-top_params_l = lapply(top_params[1:6], as.data.frame)
-
-
-#saveRDS(top_params, file = "xgb_params.rds") # Save an object to a file
-#readRDS(file = "xgb_params.rds") # Restore the object
-
-
-# train optimal model
-model_final_tuned <- xgboost(
-  params = top_params_l,
-  data = xgb_ab_train,
-  nrounds = 1000,
-  objective = "binary:logistic",
-  verbose = 0
-)
-
-
-# cm
-predictions_enet_count <- model_final_tuned %>% predict(xgb_ab_train_test, type = "prob") %>% as.vector()
-
-pred_class <- ifelse(predictions_enet_count> 0.5, 1, 0) 
-# itt vmiert csak egy pred oszlop van, erdekes.
-pred_f = factor(pred_class, levels= c("0", "1"))
-obs = as.factor(test_count$roma_felado)
-
-confusionMatrix(data = pred_f, reference = obs)$table
-
-
-# AUC
-rocplot=function(pred_class, obs, ...){
-  predob = prediction(pred_class, obs)
-  perf = performance(predob, "tpr", "fpr")
-  plot(perf,...)}
-
-rocplot(predictions_enet_count, obs, main="ROC plot")
-
-
-pred_ROCR <- prediction(pred_class, obs)
-auc_ROCR <- performance(pred_ROCR, measure = "auc")
-auc_ROCR <- round(auc_ROCR@y.values[[1]],2)
-cat("Az XGB count AUC erteke:", auc_ROCR) 
-# 0.83 AUC 220 prediktorral
-# 0.41 AUC 413 prediktorral (ez fura)
 
