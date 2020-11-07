@@ -8,8 +8,10 @@ library(dplyr)
 library(tm)
 library(glmnet)
 library(caret)
+library(randomForest)
 library(ROCR)
 library(quanteda.textmodels)
+library(xgboost)
 library (e1071)
 
 # getwd()
@@ -21,14 +23,14 @@ df_teljes = read.csv("2020-09-02_tokens_short.csv", sep = ";", stringsAsFactors 
 df <- subset(df_teljes, select = -c(sentence, id))
 rm(df_teljes)
 
-
 # 0.1. adatstrukturak letrehozasa ----------------------------------------
 
 # tf, tf_idf sulyozas, majd adjuk hozza a feature-öket
 dfm <- quanteda::dfm(x = df$word, verbose = F, group = df$telepules)
+
 require(tidytext)
 td <- tidy(dfm)
-#arrange(td, desc(count))
+
 tf_idf <- td %>%
   bind_tf_idf(term, document, count) %>%
   arrange(desc(tf)) # NB: ebben a tbl-ben benne van a count is
@@ -44,88 +46,52 @@ df_tf_idf <- convert(dfm_tf_idf, to = "data.frame")
 feat <- subset(df, select = -c(word))
 feat_agg <- feat[!duplicated(feat[ ,"telepules"]),]
 feat_agg$roma_felado = as.factor(feat_agg$roma_felado)
-#class(feat_agg$roma_felado)
 
+# caret ROC-hoz kell
+levels(feat_agg$roma_felado) <- c("nem_roma", "roma")
+
+
+# feature-ok es szovektorok osszekapcsolasa
 
 require(dplyr)
-dat_count = left_join(x = df_count, 
+dat_count_j = left_join(x = df_count, 
                  y = feat_agg, 
                  by = c("doc_id" = "telepules"), keep = F)
  
-dat_tf = left_join(x = df_tf, 
+dat_tf_j = left_join(x = df_tf, 
                       y = feat_agg, 
                       by = c("doc_id" = "telepules"), keep = F)
 
-dat_tf_idf = left_join(x = df_tf_idf, 
+dat_tf_idf_j = left_join(x = df_tf_idf, 
                       y = feat_agg, 
                       by = c("doc_id" = "telepules"), keep = F)
 
-dat_count <- subset(dat_count, select = -c(doc_id))
-dat_tf <- subset(dat_tf, select = -c(doc_id))
-dat_tf_idf <- subset(dat_tf_idf, select = -c(doc_id))
+dat_count_ns <- subset(dat_count_j, select = -c(doc_id))
+dat_tf_ns <- subset(dat_tf_j, select = -c(doc_id))
+dat_tf_idf_ns <- subset(dat_tf_idf_j, select = -c(doc_id))
 
 
-# nearzero var kezelese
-#### ez meg lefut pca-val: 
-j = nearZeroVar(dat_count, saveMetrics = F, freqCut = 20, uniqueCut = 3, names = F) #  168 db
+# lets scale variables
+dat_count_X <- subset(dat_count_ns, select = -c(roma_felado))
+dat_count_X_s = as.data.frame(scale(dat_count_X, scale = T, center = T))
+dat_count = as.data.frame(cbind(dat_count_X_s, roma_felado = dat_count_ns$roma_felado))
 
-# explanation: https://rstatisticsblog.com/data-science-in-action/data-preprocessing/how-to-identify-variables-with-zero-variance/
-# a naive bayeshez meg kell nezni a valtozok felteteles eloszalasat (as suggested by neaZero help)
+dat_tf_X <- subset(dat_tf_ns, select = -c(roma_felado))
+dat_tf_X_s = as.data.frame(scale(dat_tf_X, scale = T, center = T))
+dat_tf = as.data.frame(cbind(dat_tf_X_s, roma_felado = dat_tf_ns$roma_felado))
 
-#dat_count_nzv = dat_count
-dat_count_nzv = dat_count[,-j] # megnyolcadoltuk a valtozok szamat
-dat_tf_nzv = dat_tf[,-j]
-dat_tf_idf_nzv = dat_tf_idf[,-j]
-
-a = ncol(dat_tf_nzv)-18
-b = dat_tf_nzv[,1:a]
-legkisebb_tf = min( b[b!=min(b)] )
-
-a = ncol(dat_tf_idf_nzv)-18
-b2 = dat_tf_idf_nzv[,1:a]
-legkisebb_tf_idf = min( b2[b2!=min(b2)] )
-
-# stringek laplace korrekciohoz:
-e =  0:5
-legkisebb_tf_s = legkisebb_tf * e
-legkisebb_tf_idf_s = legkisebb_tf_idf * e
-
-
-# split train test
-set.seed(3)
-# rule of thumb to divide a data set: https://stackoverflow.com/questions/13610074/is-there-a-rule-of-thumb-for-how-to-divide-a-dataset-into-training-and-validatio#:~:text=Split%20your%20data%20into%20training,20%20is%20a%20fair%20split).
-train_index = sample(1:nrow(dat_count_nzv), 4*nrow(dat_count_nzv)/5)
-train_count = dat_count_nzv[train_index,]
-train_tf = dat_count_nzv[train_index,]
-train_tf_idf = dat_count_nzv[train_index,]
-
-test_count = dat_count_nzv[-train_index,]
-test_tf = dat_count_nzv[-train_index,]
-test_tf_idf = dat_count_nzv[-train_index,]
-
-# 0.2. EDA -----------------------------------------------------------
-
-# find most common words
-p = td %>%
-  count(term, sort = T)
-p 
-
-# wordcloud (requires a dfm)
-textplot_wordcloud(dfm, max_words = 50, rotation = 0.25, 
-                   color = rev(RColorBrewer::brewer.pal(10, "RdBu")))
-
+dat_tf_idf_X <- subset(dat_tf_idf_ns, select = -c(roma_felado))
+dat_tf_idf_X_s = as.data.frame(scale(dat_tf_idf_X, scale = T, center = T))
+dat_tf_idf = as.data.frame(cbind(dat_tf_idf_X_s, roma_felado = dat_tf_idf_ns$roma_felado))
 
 
 ###########
 # elemzes #
 ###########
 
-
 # methods in train: http://topepo.github.io/caret/train-models-by-tag.html
 
-
-
-# 1.1. elastic net  w count data -------------------------------------------------------
+# 1.1. count data -------------------------------------------------------
 
 get_best_result = function(caret_fit) {
   best = which(rownames(caret_fit$results) == rownames(caret_fit$bestTune))
@@ -142,171 +108,122 @@ library(Matrix)
 train_control <- trainControl(
   method="cv", 
   number = 3, 
-  savePredictions = TRUE)
+  savePredictions = T,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary)
 
-sorozat = seq(0, 1, 0.25)
+alfa = seq(0, 1, 0.25) # L1/L2 mixelo parameter 
+lamb = seq(0, 1, 0.25) # regularizacios buntetotag
 
 # set up tuning grid
 search_grid <- expand.grid(
-  alpha = sorozat, 
-  lambda = sorozat
-  )
+  alpha = alfa, 
+  lambda = lamb
+)
+
 
 set.seed(3)
-model <- train(
+model1 <- train(
   roma_felado ~ ., 
-  data = train_count, 
+  data = dat_count, 
   trControl = train_control, 
   tuneGrid = search_grid,
-  preProc = c("BoxCox", "center", "scale", "pca"), # scale: divides by the SD
-  method = "glmnet")
+  method = "glmnet",
+  metric = "ROC")
 
-# van vmi modszer a zero variance predictorokra: https://topepo.github.io/caret/pre-processing.html
+print(model1)
+get_best_result(model1)
 
-
-get_best_result(model)
-
-# cm
-predictions_nb_count <- model %>% predict(test_count, type = "prob") %>% as.vector()
-
-pred_class <- ifelse(predictions_nb_count[,2] > 0.5, 1, 0)
-pred_f = factor(pred_class, levels= c("0", "1"))
-obs = as.factor(test_count$roma_felado)
-
-confusionMatrix(data = pred_f, reference = obs)$table
-
-table(dat_count_nzv$ft)
+caret::confusionMatrix(model1)
+tab <- round(caret::confusionMatrix(model1)$table,0)
+"A legjobb modellhez tartozo tevesztesi matrix (százalékban):" # sum(tab)
+tab 
 
 # AUC
-rocplot=function(pred_class, obs, ...){
-  predob = prediction(pred_class, obs)
-  perf = performance(predob, "tpr", "fpr")
-  plot(perf,...)}
 
-rocplot(pred_class, obs, main="ROC plot")
-
-pred_ROCR <- prediction(pred_class, obs)
-auc_ROCR <- performance(pred_ROCR, measure = "auc")
-auc_ROCR <- round(auc_ROCR@y.values[[1]],2)
-cat("Az enet count AUC erteke:", auc_ROCR) # 0.53
+roc = round(get_best_result(model1)[[3]],2)
+cat("A legjobb modellhez tartozo AUC ertek:", roc)
 
 
+# feature importance
 
-# 1.2. elastic net w tf data -------------------------------------------------------
+enetImp = varImp(model1, lambda = 0,scale = F) # ez vonatozna a roma feladora? 
+plot(enetImp, top = 10)
 
-require(caret)
-require(glmnet)
-library(Matrix)
+# minden parameter t statisztikajanak abszoluterteke alapjan vannak rangsorolva. 
+# Ergo, sajnos csak a valtozo hatasanak nagysagat mondja meg, az iranyt nem. 
+
+# 1.2. tf data -------------------------------------------------------
 
 
 train_control <- trainControl(
   method="cv", 
   number = 3, 
-  savePredictions = TRUE)
+  savePredictions = T,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary)
 
 # set up tuning grid
 search_grid <- expand.grid(
-  alpha = sorozat, 
-  lambda = sorozat
+  alpha = alfa, 
+  lambda = lamb
 )
 
 
 set.seed(3)
-model <- train(
+model2 <- train(
   roma_felado ~ ., 
-  data = train_tf, 
+  data = dat_tf, 
   trControl = train_control, 
   tuneGrid = search_grid,
-  preProc = c("BoxCox", "center", "scale", "pca"), # scale: divides by the SD
-  method = "glmnet")
+  method = "glmnet",
+  metric = "ROC")
 
-# van vmi modszer a zero variance predictorokra: https://topepo.github.io/caret/pre-processing.html
+print(model2)
+get_best_result(model2)
 
+caret::confusionMatrix(model2)
+tab <- round(caret::confusionMatrix(model1)$table,0)
+"A legjobb modellhez tartozo tevesztesi matrix:"
+tab # szazalekban van sum(tab)
 
-get_best_result(model)
+roc = round(get_best_result(model2)[[3]],2)
+cat("A legjobb modellhez tartozo AUC ertek:", roc)
 
-# cm
-predictions_nb_tf <- model %>% predict(test_tf, type = "prob") %>% as.vector()
-
-
-pred_class <- ifelse(predictions_nb_tf[,2] > 0.5, 1, 0)
-pred_f = factor(pred_class, levels= c("0", "1"))
-obs = as.factor(test_tf$roma_felado)
-
-confusionMatrix(data = pred_f, reference = obs)$table
-
-
-# AUC
-rocplot=function(pred_class, obs, ...){
-  predob = prediction(pred_class, obs)
-  perf = performance(predob, "tpr", "fpr")
-  plot(perf,...)}
-
-rocplot(pred_class, obs, main="ROC plot")
-
-pred_ROCR <- prediction(pred_class, obs)
-auc_ROCR <- performance(pred_ROCR, measure = "auc")
-auc_ROCR <- round(auc_ROCR@y.values[[1]],2)
-cat("Az elastic net tf AUC erteke:", auc_ROCR) # 0.5
-
-
-# 1.3. elastic net w tf_idf data -------------------------------------------------------
-
-require(caret)
-require(glmnet)
-library(Matrix)
+# 1.2. tf-idf data -------------------------------------------------------
 
 
 train_control <- trainControl(
   method="cv", 
   number = 3, 
-  savePredictions = TRUE)
+  savePredictions = T,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary)
 
 # set up tuning grid
 search_grid <- expand.grid(
-  alpha = sorozat, 
-  lambda = sorozat
+  alpha = alfa, 
+  lambda = lamb 
 )
 
 
-
 set.seed(3)
-model <- train(
+model3 <- train(
   roma_felado ~ ., 
-  data = train_tf_idf, 
+  data = dat_tf_idf, 
   trControl = train_control, 
   tuneGrid = search_grid,
-  preProc = c("BoxCox", "center", "scale", "pca"), # scale: divides by the SD
-  method = "glmnet")
+  method = "glmnet",
+  metric = "ROC")
 
-# van vmi modszer a zero variance predictorokra: https://topepo.github.io/caret/pre-processing.html
+print(model3)
+get_best_result(model3)
 
+caret::confusionMatrix(model3)
+tab <- round(caret::confusionMatrix(model1)$table,0)
+"A legjobb modellhez tartozo tevesztesi matrix:"
+tab # szazalekban van sum(tab)
 
-get_best_result(model)
+roc = round(get_best_result(model3)[[3]],2)
+cat("A legjobb modellhez tartozo AUC ertek:", roc)
 
-# cm
-predictions_nb_tf_idf <- model %>% predict(test_tf_idf, type = "prob") %>% as.vector()
-
-head(text)
-head(predictions_nb_tf_idf)
-
-
-pred_class <- ifelse(predictions_nb_tf_idf[,2] > 0.5, 1, 0)
-pred_f = factor(pred_class, levels= c("0", "1"))
-obs = as.factor(test_tf$roma_felado)
-
-confusionMatrix(data = pred_f, reference = obs)$table
-
-
-# AUC
-rocplot=function(pred_class, obs, ...){
-  predob = prediction(pred_class, obs)
-  perf = performance(predob, "tpr", "fpr")
-  plot(perf,...)}
-
-rocplot(pred_class, obs, main="ROC plot")
-
-pred_ROCR <- prediction(pred_class, obs)
-auc_ROCR <- performance(pred_ROCR, measure = "auc")
-auc_ROCR <- round(auc_ROCR@y.values[[1]],2)
-cat("Az nb count AUC erteke:", auc_ROCR) # 0.5
