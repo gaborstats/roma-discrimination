@@ -13,6 +13,8 @@ library(ROCR)
 library(quanteda.textmodels)
 library(xgboost)
 library (e1071)
+library(Matrix)
+
 
 # getwd()
 setwd("C:/Users/Gabor/Documents/01_ELTE/00_szakdoga/03_Adatok/05_Adatfeldolgozas/05_NLP-proba")
@@ -31,7 +33,7 @@ rm(df_teljes)
 dfm <- quanteda::dfm(x = df$word, verbose = F, group = df$telepules)
 require(tidytext)
 td <- tidy(dfm)
-#arrange(td, desc(count))
+
 tf_idf <- td %>%
   bind_tf_idf(term, document, count) %>%
   arrange(desc(tf)) # NB: ebben a tbl-ben benne van a count is
@@ -47,48 +49,69 @@ df_tf_idf <- convert(dfm_tf_idf, to = "data.frame")
 feat <- subset(df, select = -c(word))
 feat_agg <- feat[!duplicated(feat[ ,"telepules"]),]
 feat_agg$roma_felado = as.factor(feat_agg$roma_felado)
-#class(feat_agg$roma_felado)
 
+# caret ROC-hoz kell
+levels(feat_agg$roma_felado) <- c("nem_roma", "roma")
+
+
+# feature-ok es szovektorok osszekapcsolasa
 
 require(dplyr)
-dat_count = left_join(x = df_count, 
-                 y = feat_agg, 
-                 by = c("doc_id" = "telepules"), keep = F)
- 
-dat_tf = left_join(x = df_tf, 
-                      y = feat_agg, 
-                      by = c("doc_id" = "telepules"), keep = F)
+dat_count_j = left_join(x = df_count, 
+                        y = feat_agg, 
+                        by = c("doc_id" = "telepules"), keep = F)
 
-dat_tf_idf = left_join(x = df_tf_idf, 
-                      y = feat_agg, 
-                      by = c("doc_id" = "telepules"), keep = F)
+dat_tf_j = left_join(x = df_tf, 
+                     y = feat_agg, 
+                     by = c("doc_id" = "telepules"), keep = F)
 
-dat_count <- subset(dat_count, select = -c(doc_id))
-dat_tf <- subset(dat_tf, select = -c(doc_id))
-dat_tf_idf <- subset(dat_tf_idf, select = -c(doc_id))
+dat_tf_idf_j = left_join(x = df_tf_idf, 
+                         y = feat_agg, 
+                         by = c("doc_id" = "telepules"), keep = F)
 
-# haromszor ismeteltuk, mehetne fv-be
-# names(dat_count)[3800:3817]
+
+dat_count_ns <- subset(dat_count_j, select = -c(doc_id))
+dat_tf_ns <- subset(dat_tf_j, select = -c(doc_id))
+dat_tf_idf_ns <- subset(dat_tf_idf_j, select = -c(doc_id))
+
+# lets scale variables, wt centering
+
+dat_count_X <- subset(dat_count_ns, select = -c(roma_felado))
+dat_count_X_s = as.data.frame(scale(dat_count_X, scale = T, center = T))
+dat_count = as.data.frame(cbind(dat_count_X_s, roma_felado = dat_count_ns$roma_felado))
+
+dat_tf_X <- subset(dat_tf_ns, select = -c(roma_felado))
+dat_tf_X_s = as.data.frame(scale(dat_tf_X, scale = T, center = T))
+dat_tf = as.data.frame(cbind(dat_tf_X_s, roma_felado = dat_tf_ns$roma_felado))
+
+dat_tf_idf_X <- subset(dat_tf_idf_ns, select = -c(roma_felado))
+dat_tf_idf_X_s = as.data.frame(scale(dat_tf_idf_X, scale = T, center = T))
+dat_tf_idf = as.data.frame(cbind(dat_tf_idf_X_s, roma_felado = dat_tf_idf_ns$roma_felado))
+
 
 # nearzero var kezelese
-#### ez meg lefut pca-val: 
-j = nearZeroVar(dat_count, saveMetrics = F, freqCut = 25, uniqueCut = 3, names = F) # 273 db, nem fut le
+# ez meg lefut pca-val: 
+j = nearZeroVar(dat_count, saveMetrics = F, freqCut = 20, uniqueCut = 2, names = F) # 167 db prediktor
+
 
 # explanation: https://rstatisticsblog.com/data-science-in-action/data-preprocessing/how-to-identify-variables-with-zero-variance/
 # a naive bayeshez meg kell nezni a valtozok felteteles eloszalasat (as suggested by neaZero help)
 
-#dat_count_nzv = dat_count
 dat_count_nzv = dat_count[,-j] # megnyolcadoltuk a valtozok szamat
 dat_tf_nzv = dat_tf[,-j]
 dat_tf_idf_nzv = dat_tf_idf[,-j]
 
+# check conditionals
+# checkConditionalX(x = dat_count_nzv, y = dat_count_nzv$roma_felado)
+# there are 153 columns of x that are sparse in y
+
 a = ncol(dat_tf_nzv)-18
 b = dat_tf_nzv[,1:a]
-legkisebb_tf = min( b[b!=min(b)] )
+legkisebb_tf = min( abs(b)[abs(b)!=abs(min(b))] )
 
 a = ncol(dat_tf_idf_nzv)-18
 b2 = dat_tf_idf_nzv[,1:a]
-legkisebb_tf_idf = min( b2[b2!=min(b2)] )
+legkisebb_tf_idf = min( abs(b2)[abs(b2)!=min(abs(b2))] )
 
 # stringek laplace korrekciohoz:
 e =  0:5
@@ -96,36 +119,10 @@ legkisebb_tf_s = legkisebb_tf * e
 legkisebb_tf_idf_s = legkisebb_tf_idf * e
 
 
-# split train test
-set.seed(3)
-# rule of thumb to divide a data set: https://stackoverflow.com/questions/13610074/is-there-a-rule-of-thumb-for-how-to-divide-a-dataset-into-training-and-validatio#:~:text=Split%20your%20data%20into%20training,20%20is%20a%20fair%20split).
-train_index = sample(1:nrow(dat_count_nzv), 4*nrow(dat_count_nzv)/5)
-train_count = dat_count_nzv[train_index,]
-train_tf = dat_count_nzv[train_index,]
-train_tf_idf = dat_count_nzv[train_index,]
-
-test_count = dat_count_nzv[-train_index,]
-test_tf = dat_count_nzv[-train_index,]
-test_tf_idf = dat_count_nzv[-train_index,]
-
-# 0.2. EDA -----------------------------------------------------------
-
-# find most common words
-p = td %>%
-  count(term, sort = T)
-p 
-
-# wordcloud (requires a dfm)
-textplot_wordcloud(dfm, max_words = 50, rotation = 0.25, 
-                   color = rev(RColorBrewer::brewer.pal(10, "RdBu")))
-
-
 
 ###########
 # elemzes #
 ###########
-
-# nezzuk meg how to do cv on lasso es redge es azokat futassuk kulon-kulon
 
 # naive bayes: https://uc-r.github.io/naive_bayes
 # nb 2 : https://www.analyticsvidhya.com/blog/2017/09/naive-bayes-explained/#:~:text=Naive%20Bayes%20Model-,What%20is%20Naive%20Bayes%20algorithm%3F,presence%20of%20any%20other%20feature.
@@ -140,190 +137,144 @@ get_best_result = function(caret_fit) {
   best_result
 }
 
-require(caret)
-require(glmnet)
-library(Matrix)
-
 
 train_control <- trainControl(
   method="cv", 
   number = 3, 
-  savePredictions = TRUE)
+  savePredictions = TRUE,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary)
 
 # set up tuning grid
 search_grid <- expand.grid(
   usekernel = c(TRUE, FALSE),
-  fL = 0:5, # laplace correction
+  fL = c(0,1), # laplace correction, azert van, ha egyik csoport erteke 0 vmelyik kategoriaban, akkor ne legyen az egesz egyenloseg 0.
   adjust = seq(0, 5, by = 1) # allows us to adjust the bandwidth of the 
   # kernel density (larger numbers mean more flexible density estimate)
+  # ez a folytonos, nem normallis eloszlasu valtozokhoz kell
 )
 
-
 set.seed(3)
+start.time <- Sys.time()
+
 model <- train(
   roma_felado ~ ., 
-  data = train_count, 
+  data = dat_count_nzv, 
   trControl = train_control, 
-  tuneGrid = search_grid,
-  preProc = c("BoxCox", "center", "scale", "pca"), # scale: divides by the SD
-  method = "nb")
+  tuneGrid = search_grid, 
+  preProcess = "pca",
+  method = "nb",
+  metric = "ROC")
 
-# van vmi modszer a zero variance predictorokra: https://topepo.github.io/caret/pre-processing.html
+end.time <- Sys.time()
+time.taken <- end.time - start.time
+time.taken 
 
+# pca nelkul csak par tucat prediktorral fut le az nb modell.
 
+print(model)
 get_best_result(model)
 
-# cm
-predictions_nb_count <- model %>% predict(test_count, type = "prob") %>% as.vector()
+caret::confusionMatrix(model)
+tab <- round(caret::confusionMatrix(model)$table,0)
+"A legjobb modellhez tartozo tevesztesi matrix:"
+tab # szazalekban van 
 
-pred_class <- ifelse(predictions_nb_count[,2] > 0.5, 1, 0)
-pred_f = factor(pred_class, levels= c("0", "1"))
-obs = as.factor(test_count$roma_felado)
-
-confusionMatrix(data = pred_f, reference = obs)$table
+roc = round(get_best_result(model)[[4]],2)
+cat("A legjobb modellhez tartozo AUC ertek:", roc)
 
 
-# AUC
-rocplot=function(pred_class, obs, ...){
-  predob = prediction(pred_class, obs)
-  perf = performance(predob, "tpr", "fpr")
-  plot(perf,...)}
+# feature importance
 
-rocplot(pred_class, obs, main="ROC plot")
+enetImp = varImp(model, scale = F) 
+plot(enetImp, top = 10)
 
-pred_ROCR <- prediction(pred_class, obs)
-auc_ROCR <- performance(pred_ROCR, measure = "auc")
-auc_ROCR <- round(auc_ROCR@y.values[[1]],2)
-cat("Az nb count AUC erteke:", auc_ROCR) # 0.49
-
-#head(predictions_nb_count)
-#write.table(predictions_nb_count, file = "pred_nb_count.txt", sep = "\t",
-#            row.names = TRUE)
-
-#warnings()
-# 48 megfigyelesnel panaszkodik, h 0 a valoszinuseg minden osztalyra
-# nem segitett a laplace korrekcio sem (nem az a legjobb modell
-# ahol korrigalunk)
 
 
 
 # 1.2. naive bayes w tf data -------------------------------------------------------
 
-require(caret)
-require(glmnet)
-library(Matrix)
-
-
-train_control <- trainControl(
-  method="cv", 
-  number = 3, 
-  savePredictions = TRUE)
-
 # set up tuning grid
 search_grid <- expand.grid(
   usekernel = c(TRUE, FALSE),
-  fL = legkisebb_tf_s, # laplace correction
+  fL = c(0,1), # laplace correction
   adjust = seq(0, 5, by = 1) # allows us to adjust the bandwidth of the 
   # kernel density (larger numbers mean more flexible density estimate)
 )
 
 
 set.seed(3)
-model <- train(
+start.time <- Sys.time()
+
+model_tf <- train(
   roma_felado ~ ., 
-  data = train_tf, 
+  data = dat_tf_nzv, 
   trControl = train_control, 
   tuneGrid = search_grid,
-  preProc = c("BoxCox", "center", "scale", "pca"), # scale: divides by the SD
-  method = "nb")
+  preProcess = "pca",
+  method = "nb",
+  metric = "ROC")
 
-# van vmi modszer a zero variance predictorokra: https://topepo.github.io/caret/pre-processing.html
+end.time <- Sys.time()
+time.taken <- end.time - start.time
+time.taken 
 
+get_best_result(model_tf)
 
-get_best_result(model)
+caret::confusionMatrix(model_tf)
+tab <- round(caret::confusionMatrix(model_tf)$table,0)
+"A legjobb modellhez tartozo tevesztesi matrix:"
+tab # szazalekban van 
 
-# cm
-predictions_nb_tf <- model %>% predict(test_tf, type = "prob") %>% as.vector()
+roc = round(get_best_result(model_tf)[[4]],2)
+cat("A legjobb modellhez tartozo AUC ertek:", roc)
 
-pred_class <- ifelse(predictions_nb_tf[,2] > 0.5, 1, 0)
-pred_f = factor(pred_class, levels= c("0", "1"))
-obs = as.factor(test_tf$roma_felado)
+# feature importance
 
-confusionMatrix(data = pred_f, reference = obs)$table
+enetImp = varImp(model_tf, scale = F) 
+plot(enetImp, top = 10)
 
-
-# AUC
-rocplot=function(pred_class, obs, ...){
-  predob = prediction(pred_class, obs)
-  perf = performance(predob, "tpr", "fpr")
-  plot(perf,...)}
-
-rocplot(pred_class, obs, main="ROC plot")
-
-pred_ROCR <- prediction(pred_class, obs)
-auc_ROCR <- performance(pred_ROCR, measure = "auc")
-auc_ROCR <- round(auc_ROCR@y.values[[1]],2)
-cat("Az nb count AUC erteke:", auc_ROCR) # 49 
 
 
 # 1.3. naive bayes w tf_idf data -------------------------------------------------------
 
-require(caret)
-require(glmnet)
-library(Matrix)
-
-
-train_control <- trainControl(
-  method="cv", 
-  number = 3, 
-  savePredictions = TRUE)
-
 # set up tuning grid
 search_grid <- expand.grid(
   usekernel = c(TRUE, FALSE),
-  fL = legkisebb_tf_idf_s, # laplace correction
+  fL = c(0,1), # laplace correction
   adjust = seq(0, 5, by = 1) # allows us to adjust the bandwidth of the 
   # kernel density (larger numbers mean more flexible density estimate)
 )
 
 
 set.seed(3)
-model <- train(
+start.time <- Sys.time()
+
+model_tf_idf <- train(
   roma_felado ~ ., 
-  data = train_tf_idf, 
+  data = dat_tf_idf_nzv, 
   trControl = train_control, 
   tuneGrid = search_grid,
-  preProc = c("BoxCox", "center", "scale", "pca"), # scale: divides by the SD
-  method = "nb")
+  preProcess = "pca",
+  method = "nb",
+  metric = "ROC")
 
-# van vmi modszer a zero variance predictorokra: https://topepo.github.io/caret/pre-processing.html
+end.time <- Sys.time()
+time.taken <- end.time - start.time
+time.taken 
 
+get_best_result(model_tf_idf)
 
-get_best_result(model)
+caret::confusionMatrix(model_tf_idf)
+tab <- round(caret::confusionMatrix(model_tf_idf)$table,0)
+"A legjobb modellhez tartozo tevesztesi matrix:"
+tab # szazalekban van 
 
-# cm
-predictions_nb_tf_idf <- model %>% predict(test_tf_idf, type = "prob") %>% as.vector()
-
-head(text)
-head(predictions_nb_tf_idf)
-
-
-pred_class <- ifelse(predictions_nb_tf_idf[,2] > 0.5, 1, 0)
-pred_f = factor(pred_class, levels= c("0", "1"))
-obs = as.factor(test_tf$roma_felado)
-
-confusionMatrix(data = pred_f, reference = obs)$table
+roc = round(get_best_result(model_tf_idf)[[4]],2)
+cat("A legjobb modellhez tartozo AUC ertek:", roc)
 
 
-# AUC
-rocplot=function(pred_class, obs, ...){
-  predob = prediction(pred_class, obs)
-  perf = performance(predob, "tpr", "fpr")
-  plot(perf,...)}
+# feature importance
 
-rocplot(pred_class, obs, main="ROC plot")
-
-pred_ROCR <- prediction(pred_class, obs)
-auc_ROCR <- performance(pred_ROCR, measure = "auc")
-auc_ROCR <- round(auc_ROCR@y.values[[1]],2)
-cat("Az nb count AUC erteke:", auc_ROCR) # 49 
+enetImp = varImp(model_tf_idf, scale = F) 
+plot(enetImp, top = 10)
